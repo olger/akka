@@ -10,8 +10,8 @@ import java.io.IOException;
 
 import akka.actor.ActorSystem;
 import akka.stream.ActorAttributes;
-import akka.stream.io.SynchronousFileSink;
-import akka.stream.io.SynchronousFileSource;
+import akka.stream.io.FileSink;
+import akka.stream.io.FileSource;
 import akka.stream.javadsl.Sink;
 import docs.stream.SilenceSystemOut;
 import docs.stream.cookbook.RecipeParseLines;
@@ -60,7 +60,7 @@ public class StreamFileDocTest {
         Sink.foreach(chunk -> System.out.println(chunk.utf8String()));
 
       Future<Long> bytesWritten =
-        SynchronousFileSource.create(file)
+        Source.file(file)
           .to(printlnSink)
           .run(mat);
       //#file-source
@@ -76,7 +76,7 @@ public class StreamFileDocTest {
     try {
       Sink<ByteString, Future<Long>> byteStringFutureSink =
       //#custom-dispatcher-code
-      SynchronousFileSink.create(file)
+      Sink.file(file)
         .withAttributes(ActorAttributes.dispatcher("custom-blocking-io-dispatcher"));
       //#custom-dispatcher-code
     } finally {

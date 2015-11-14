@@ -420,3 +420,17 @@ And use of query parameters from ``Uri`` that looked like this:
 should be replaced by:
 
 .. includecode:: code/docs/MigrationsJava.java#query-param
+
+SynchronousFileSource and SynchronousFileSink
+============================================
+
+Both have been replaced by `Source.file(…)` and `Sink.file(…)`.
+
+Update procedure
+----------------
+
+Replace `SynchronousFileSource.create(` with `Source.file(`
+
+Replace `SynchronousFileSink.create(` with `Sink.file(`
+
+Replace `SynchronousFileSink.appendTo(f)` with `Sink.file(f, true)`
