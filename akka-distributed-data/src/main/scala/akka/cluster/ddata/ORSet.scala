@@ -65,13 +65,13 @@ object ORSet {
     if (dot.isEmpty)
       VersionVector.empty
     else {
-      dot.versions match {
-        case Right((node, v1)) ⇒
+      dot match {
+        case OneVersionVector(node, v1) ⇒
           // if dot is dominated by version vector, drop it
           if (vvector.versionAt(node) >= v1) VersionVector.empty
           else dot
 
-        case Left(vs) ⇒
+        case ManyVersionVector(vs) ⇒
           val remaining = vs.toList
           val newDots = dropDots(remaining, Nil)
           VersionVector(newDots)
@@ -91,9 +91,9 @@ object ORSet {
       case (acc, k) ⇒
         val lhsDots = lhs.elementsMap(k)
         val rhsDots = rhs.elementsMap(k)
-        (lhsDots.versions, rhsDots.versions) match {
-          case (Right(t1), Right(t2)) ⇒
-            if (t1 == t2)
+        (lhsDots, rhsDots) match {
+          case (OneVersionVector(n1, v1), OneVersionVector(n2, v2)) ⇒
+            if (n1 == n2 && v1 == v2)
               // one single common dot
               acc.updated(k, lhsDots)
             else {
@@ -105,7 +105,7 @@ object ORSet {
               if (merged.isEmpty) acc
               else acc.updated(k, merged)
             }
-          case (Left(lhsVs), Left(rhsVs)) ⇒
+          case (ManyVersionVector(lhsVs), ManyVersionVector(rhsVs)) ⇒
             val commonDots = lhsVs.filter {
               case (thisDotNode, v) ⇒ rhsVs.get(thisDotNode).exists(_ == v)
             }
@@ -118,7 +118,7 @@ object ORSet {
             // Perfectly possible that an item in both sets should be dropped
             if (merged.isEmpty) acc
             else acc.updated(k, merged)
-          case (Left(lhsVs), Right(rhsVs @ (n2, v2))) ⇒
+          case (ManyVersionVector(lhsVs), OneVersionVector(n2, v2)) ⇒
             val commonDots = lhsVs.filter {
               case (n1, v1) ⇒ v1 == v2 && n1 == n2
             }
@@ -131,7 +131,7 @@ object ORSet {
             // Perfectly possible that an item in both sets should be dropped
             if (merged.isEmpty) acc
             else acc.updated(k, merged)
-          case (Right(lhsVs @ (n1, v1)), Left(rhsVs)) ⇒
+          case (OneVersionVector(n1, v1), ManyVersionVector(rhsVs)) ⇒
             val commonDots = rhsVs.filter {
               case (n2, v2) ⇒ v1 == v2 && n1 == n2
             }

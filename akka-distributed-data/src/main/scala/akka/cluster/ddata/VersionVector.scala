@@ -17,16 +17,16 @@ import akka.cluster.UniqueAddress
 object VersionVector {
 
   private val emptyVersions: TreeMap[UniqueAddress, Long] = TreeMap.empty
-  val empty: VersionVector = new VersionVector(Left(emptyVersions))
+  val empty: VersionVector = ManyVersionVector(emptyVersions)
 
   def apply(): VersionVector = empty
 
   def apply(versions: TreeMap[UniqueAddress, Long]): VersionVector =
     if (versions.isEmpty) empty
     else if (versions.size == 1) apply(versions.head._1, versions.head._2)
-    else new VersionVector(Left(versions))
+    else ManyVersionVector(versions)
 
-  def apply(node: UniqueAddress, version: Long): VersionVector = new VersionVector(Right(node -> version))
+  def apply(node: UniqueAddress, version: Long): VersionVector = OneVersionVector(node, version)
 
   /** INTERNAL API */
   private[akka] def apply(versions: List[(UniqueAddress, Long)]): VersionVector =
@@ -69,7 +69,8 @@ object VersionVector {
    */
   def ConcurrentInstance = Concurrent
 
-  private object Timestamp {
+  /** INTERNAL API */
+  private[akka] object Timestamp {
     final val Zero = 0L
     final val EndMarker = Long.MinValue
     val counter = new AtomicLong(1L)
@@ -95,8 +96,7 @@ object VersionVector {
  * This class is immutable, i.e. "modifying" methods return a new instance.
  */
 @SerialVersionUID(1L)
-final case class VersionVector private[akka] (
-  private[akka] val versions: Either[TreeMap[UniqueAddress, Long], (UniqueAddress, Long)])
+sealed abstract class VersionVector
   extends ReplicatedData with ReplicatedDataSerialization with RemovedNodePruning {
 
   type T = VersionVector
@@ -119,60 +119,28 @@ final case class VersionVector private[akka] (
    */
   def increment(node: Cluster): VersionVector = increment(node.selfUniqueAddress)
 
-  def isEmpty: Boolean =
-    (this eq VersionVector.empty) || (versions match {
-      case Right(_)      ⇒ false
-      case Left(treeMap) ⇒ treeMap.isEmpty
-    })
+  def isEmpty: Boolean
 
   /**
    * INTERNAL API
    */
-  private[akka] def size: Int =
-    versions match {
-      case Left(treeMap) ⇒ treeMap.size
-      case Right(_)      ⇒ 1
-    }
+  private[akka] def size: Int
 
   /**
    * INTERNAL API
    * Increment the version for the node passed as argument. Returns a new VersionVector.
    */
-  private[akka] def increment(node: UniqueAddress): VersionVector = {
-    val v = Timestamp.counter.getAndIncrement()
-    val newVersions = versions match {
-      case Left(treeMap) ⇒
-        if (treeMap.isEmpty) Right(node -> v)
-        else Left(treeMap.updated(node, v))
-      case Right(t @ (n, _)) ⇒
-        if (n == node) Right(n -> v)
-        else Left(emptyVersions + t + (node -> v))
-    }
-    VersionVector(versions = newVersions)
-  }
+  private[akka] def increment(node: UniqueAddress): VersionVector
 
   /**
    * INTERNAL API
    */
-  private[akka] def versionAt(node: UniqueAddress): Long =
-    versions match {
-      case Left(treeMap) ⇒ treeMap.get(node) match {
-        case Some(v) ⇒ v
-        case None    ⇒ Timestamp.Zero
-      }
-      case Right((n, v)) ⇒
-        if (n == node) v
-        else Timestamp.Zero
-    }
+  private[akka] def versionAt(node: UniqueAddress): Long
 
   /**
    * INTERNAL API
    */
-  private[akka] def contains(node: UniqueAddress): Boolean =
-    versions match {
-      case Left(treeMap) ⇒ treeMap.contains(node)
-      case Right((n, _)) ⇒ n == node
-    }
+  private[akka] def contains(node: UniqueAddress): Boolean
 
   /**
    * Returns true if <code>this</code> and <code>that</code> are concurrent else false.
@@ -247,18 +215,14 @@ final case class VersionVector private[akka] (
       compareNext(nextOrElse(i1, cmpEndMarker), nextOrElse(i2, cmpEndMarker), Same)
     }
 
-    if ((this eq that) || (this.versions eq that.versions)) Same
+    if (this eq that) Same
     else compare(this.versionsIterator, that.versionsIterator, if (order eq Concurrent) FullOrder else order)
   }
 
   /**
    * INTERNAL API
    */
-  private[akka] def versionsIterator: Iterator[(UniqueAddress, Long)] =
-    versions match {
-      case Right(tuple)  ⇒ Iterator.single(tuple)
-      case Left(treeMap) ⇒ treeMap.iterator
-    }
+  private[akka] def versionsIterator: Iterator[(UniqueAddress, Long)]
 
   /**
    * Compare two version vectors. The outcome will be one of the following:
@@ -277,56 +241,128 @@ final case class VersionVector private[akka] (
   /**
    * Merges this VersionVector with another VersionVector. E.g. merges its versioned history.
    */
-  def merge(that: VersionVector): VersionVector = {
-    (this.versions, that.versions) match {
-      case (Left(vs1), Left(vs2)) ⇒
+  def merge(that: VersionVector): VersionVector
+
+  override def needPruningFrom(removedNode: UniqueAddress): Boolean
+
+  override def prune(removedNode: UniqueAddress, collapseInto: UniqueAddress): VersionVector
+
+  override def pruningCleanup(removedNode: UniqueAddress): VersionVector
+
+}
+
+final case class OneVersionVector private[akka] (node: UniqueAddress, version: Long) extends VersionVector {
+  import VersionVector.Timestamp
+
+  override def isEmpty: Boolean = false
+
+  /** INTERNAL API */
+  private[akka] override def size: Int = 1
+
+  /** INTERNAL API */
+  private[akka] override def increment(n: UniqueAddress): VersionVector = {
+    val v = Timestamp.counter.getAndIncrement()
+    if (n == node) copy(version = v)
+    else ManyVersionVector(TreeMap(node -> version, n -> v))
+  }
+
+  /** INTERNAL API */
+  private[akka] override def versionAt(n: UniqueAddress): Long =
+    if (n == node) version
+    else Timestamp.Zero
+
+  /** INTERNAL API */
+  private[akka] override def contains(n: UniqueAddress): Boolean =
+    n == node
+
+  /** INTERNAL API */
+  private[akka] override def versionsIterator: Iterator[(UniqueAddress, Long)] =
+    Iterator.single((node, version))
+
+  override def merge(that: VersionVector): VersionVector = {
+    that match {
+      case OneVersionVector(n2, v2) ⇒
+        if (node == n2) if (version >= v2) this else OneVersionVector(n2, v2)
+        else ManyVersionVector(TreeMap(node -> version, n2 -> v2))
+      case ManyVersionVector(vs2) ⇒
+        val v2 = vs2.getOrElse(node, Timestamp.Zero)
+        val mergedVersions =
+          if (v2 >= version) vs2
+          else vs2.updated(node, version)
+        VersionVector(mergedVersions)
+    }
+  }
+
+  override def needPruningFrom(removedNode: UniqueAddress): Boolean =
+    node == removedNode
+
+  override def prune(removedNode: UniqueAddress, collapseInto: UniqueAddress): VersionVector =
+    (if (node == removedNode) VersionVector.empty else this) + collapseInto
+
+  override def pruningCleanup(removedNode: UniqueAddress): VersionVector =
+    if (node == removedNode) VersionVector.empty else this
+
+  override def toString: String =
+    s"VersionVector($node -> $version)"
+
+}
+
+final case class ManyVersionVector(versions: TreeMap[UniqueAddress, Long]) extends VersionVector {
+  import VersionVector.Timestamp
+
+  override def isEmpty: Boolean = versions.isEmpty
+
+  /** INTERNAL API */
+  private[akka] override def size: Int = versions.size
+
+  /** INTERNAL API */
+  private[akka] override def increment(node: UniqueAddress): VersionVector = {
+    val v = Timestamp.counter.getAndIncrement()
+    VersionVector(versions.updated(node, v))
+  }
+
+  /** INTERNAL API */
+  private[akka] override def versionAt(node: UniqueAddress): Long = versions.get(node) match {
+    case Some(v) ⇒ v
+    case None    ⇒ Timestamp.Zero
+  }
+
+  /** INTERNAL API */
+  private[akka] override def contains(node: UniqueAddress): Boolean =
+    versions.contains(node)
+
+  /** INTERNAL API */
+  private[akka] override def versionsIterator: Iterator[(UniqueAddress, Long)] =
+    versions.iterator
+
+  override def merge(that: VersionVector): VersionVector = {
+    that match {
+      case ManyVersionVector(vs2) ⇒
         var mergedVersions = vs2
-        for ((node, time) ← vs1) {
+        for ((node, time) ← versions) {
           val mergedVersionsCurrentTime = mergedVersions.getOrElse(node, Timestamp.Zero)
           if (time > mergedVersionsCurrentTime)
             mergedVersions = mergedVersions.updated(node, time)
         }
         VersionVector(mergedVersions)
-      case (Right(t1 @ (n1, v1)), Right(t2 @ (n2, v2))) ⇒
-        if (n1 == n2) if (v1 > v2) VersionVector(Right(t2)) else VersionVector(Right(t1))
-        else VersionVector(Left(emptyVersions + t1 + t2))
-      case (Left(vs1), Right(t2 @ (n2, v2))) ⇒
-        val v1 = vs1.getOrElse(n2, Timestamp.Zero)
+      case OneVersionVector(n2, v2) ⇒
+        val v1 = versions.getOrElse(n2, Timestamp.Zero)
         val mergedVersions =
-          if (v1 > v2) vs1
-          else vs1.updated(n2, v2)
-        VersionVector(mergedVersions)
-      case (Right(t1 @ (n1, v1)), Left(vs2)) ⇒
-        val v2 = vs2.getOrElse(n1, Timestamp.Zero)
-        val mergedVersions =
-          if (v2 > v1) vs2
-          else vs2.updated(n1, v1)
+          if (v1 >= v2) versions
+          else versions.updated(n2, v2)
         VersionVector(mergedVersions)
     }
-
   }
 
   override def needPruningFrom(removedNode: UniqueAddress): Boolean =
-    versions match {
-      case Left(treeMap) ⇒ treeMap.contains(removedNode)
-      case Right((n, _)) ⇒ n == removedNode
-    }
+    versions.contains(removedNode)
 
   override def prune(removedNode: UniqueAddress, collapseInto: UniqueAddress): VersionVector =
-    versions match {
-      case Left(treeMap) ⇒ VersionVector(versions = treeMap - removedNode) + collapseInto
-      case Right((n, _)) ⇒ (if (n == removedNode) empty else this) + collapseInto
-    }
+    VersionVector(versions = versions - removedNode) + collapseInto
 
   override def pruningCleanup(removedNode: UniqueAddress): VersionVector =
-    versions match {
-      case Left(treeMap) ⇒ VersionVector(versions = treeMap - removedNode)
-      case Right((n, _)) ⇒ (if (n == removedNode) empty else this)
-    }
+    VersionVector(versions = versions - removedNode)
 
-  override def toString: String = versions match {
-    case Left(treeMap) ⇒ treeMap.map { case ((n, v)) ⇒ n + " -> " + v }.mkString("VersionVector(", ", ", ")")
-    case Right((n, v)) ⇒ s"VersionVector($n -> $v)"
-  }
-
+  override def toString: String =
+    versions.map { case ((n, v)) ⇒ n + " -> " + v }.mkString("VersionVector(", ", ", ")")
 }

@@ -574,7 +574,9 @@ object MiMa extends AutoPlugin {
 
         //#18353 Changes to methods and fields private to remoting actors
         ProblemFilters.exclude[MissingMethodProblem]("akka.remote.EndpointManager.retryGateEnabled"),
-        ProblemFilters.exclude[IncompatibleResultTypeProblem]("akka.remote.EndpointManager.pruneTimerCancellable")
+        ProblemFilters.exclude[IncompatibleResultTypeProblem]("akka.remote.EndpointManager.pruneTimerCancellable"),
+
+        FilterAnyProblem("akka.cluster.ddata.VersionVector")
       )
     )
   }
